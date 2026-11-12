@@ -92,22 +92,6 @@ COPY "clunkyard.cpy".
 01 CURRENT        USAGE COMP-2.
 01 GAIN           USAGE COMP-2.
 01 STEERED        USAGE COMP-2.
-*> The calibration kernel's numbers. Each -BITS item is its double's IEEE
-*> bits, where one more is the next double up.
-01 CAL-WORK       USAGE COMP-2.
-01 CAL-ROUNDS     PIC S9(9) COMP-5.
-01 CAL-X          USAGE BINARY-DOUBLE UNSIGNED.
-01 CAL-SHIFTED    USAGE BINARY-DOUBLE UNSIGNED.
-01 CAL-SUM        USAGE COMP-2.
-01 CAL-SUM-BITS   REDEFINES CAL-SUM USAGE BINARY-DOUBLE UNSIGNED.
-01 CAL-ROOT       USAGE COMP-2.
-01 CAL-ROOT-BITS  REDEFINES CAL-ROOT USAGE BINARY-DOUBLE UNSIGNED.
-01 CAL-NEAR       USAGE COMP-2.
-01 CAL-NEAR-BITS  REDEFINES CAL-NEAR USAGE BINARY-DOUBLE UNSIGNED.
-01 CAL-NEXT       USAGE COMP-2.
-01 CAL-NEXT-BITS  REDEFINES CAL-NEXT USAGE BINARY-DOUBLE UNSIGNED.
-01 CAL-OUT        USAGE COMP-2.
-
 PROCEDURE DIVISION.
 MAIN-LOOP.
     PERFORM UNTIL CY-SESSION-EVENT-END
@@ -178,7 +162,7 @@ TAKE-TURN.
             CALL "CY-DRIVE-PITCH-TURN" USING STEERED
         END-IF
     END-IF
-    PERFORM CALIBRATE.
+    CONTINUE.
 
 TRACK-TARGET.
     EVALUATE TRUE
@@ -296,68 +280,3 @@ STEER.
     CALL "CY-ANGLES-ANGLE-DIFF" USING TOWARDS CURRENT ANGLE-ERROR
     COMPUTE WORK = ANGLE-ERROR / GAIN
     CALL "CY-ANGLES-CLAMP" USING WORK UNIT-LOW UNIT-HIGH STEERED.
-
-*> ---- The arena's rate calibration: safe to delete, with its PERFORM ----
-*> Only the calibration sends calibration.work; it times this language on
-*> the same work as every other. The kernel is xorshift-sqrt v1: work rounds
-*> of a 64-bit xorshift and a square-root sum, reported as WORK. COBOL has
-*> no bitwise operators, so CBL_XOR does XOR and shifts multiply or divide
-*> by powers of two. GnuCOBOL works COMP-2 arithmetic in decimal and
-*> truncates the result, so each root and each sum is rounded to the
-*> nearest double by hand.
-CALIBRATE.
-    MOVE 0 TO CAL-WORK
-    CALL "CY-RAW-NUMBER" USING Z"state.calibration.work" CAL-WORK
-    IF CAL-WORK < 1
-        EXIT PARAGRAPH
-    END-IF
-    MOVE 88172645463325252 TO CAL-X
-    MOVE CY-CLOCK-TICK TO CAL-SHIFTED
-    CALL "CBL_XOR" USING CAL-SHIFTED CAL-X BY VALUE 8
-    MOVE CAL-WORK TO CAL-ROUNDS
-    MOVE 0 TO CAL-SUM
-    PERFORM CAL-ROUNDS TIMES
-        *> x << 13 keeps the low 51 bits, and x << 17 the low 47.
-        COMPUTE CAL-SHIFTED = FUNCTION MOD(CAL-X, 2 ** 51) * 2 ** 13
-        CALL "CBL_XOR" USING CAL-SHIFTED CAL-X BY VALUE 8
-        COMPUTE CAL-SHIFTED = CAL-X / 2 ** 7
-        CALL "CBL_XOR" USING CAL-SHIFTED CAL-X BY VALUE 8
-        COMPUTE CAL-SHIFTED = FUNCTION MOD(CAL-X, 2 ** 47) * 2 ** 17
-        CALL "CBL_XOR" USING CAL-SHIFTED CAL-X BY VALUE 8
-        COMPUTE CAL-SHIFTED = CAL-X / 2 ** 11
-        PERFORM CALIBRATION-ROOT
-        PERFORM CALIBRATION-ADD
-    END-PERFORM
-    COMPUTE CAL-SHIFTED = CAL-X / 2 ** 40
-    COMPUTE CAL-OUT = FUNCTION MOD(FUNCTION INTEGER(CAL-SUM) + CAL-SHIFTED, 1000000)
-    CALL "CY-STATUS-TEXT" USING Z"WORK"
-    CALL "CY-STATUS-VALUE" USING CAL-OUT.
-
-*> The square root of CAL-SHIFTED to the nearest double: FUNCTION SQRT
-*> comes close, and a neighbour is nearer while the midpoint between
-*> them is on the root's side.
-CALIBRATION-ROOT.
-    COMPUTE CAL-ROOT = FUNCTION SQRT(CAL-SHIFTED)
-    COMPUTE CAL-NEXT-BITS = CAL-ROOT-BITS + 1
-    PERFORM UNTIL (CAL-ROOT + CAL-NEXT) * (CAL-ROOT + CAL-NEXT) > 4 * CAL-SHIFTED
-        MOVE CAL-NEXT-BITS TO CAL-ROOT-BITS
-        ADD 1 TO CAL-NEXT-BITS
-    END-PERFORM
-    COMPUTE CAL-NEXT-BITS = CAL-ROOT-BITS - 1
-    PERFORM UNTIL CAL-ROOT-BITS = 0
-            OR (CAL-ROOT + CAL-NEXT) * (CAL-ROOT + CAL-NEXT) < 4 * CAL-SHIFTED
-        MOVE CAL-NEXT-BITS TO CAL-ROOT-BITS
-        SUBTRACT 1 FROM CAL-NEXT-BITS
-    END-PERFORM.
-
-*> CAL-SUM + CAL-ROOT to the nearest double, ties to even: the truncated
-*> sum, or the next double up when the exact sum is nearer to that.
-CALIBRATION-ADD.
-    COMPUTE CAL-NEAR = CAL-SUM + CAL-ROOT
-    COMPUTE CAL-NEXT-BITS = CAL-NEAR-BITS + 1
-    IF 2 * (CAL-SUM + CAL-ROOT) > CAL-NEAR + CAL-NEXT
-            OR (2 * (CAL-SUM + CAL-ROOT) = CAL-NEAR + CAL-NEXT AND FUNCTION MOD(CAL-NEXT-BITS, 2) = 0)
-        MOVE CAL-NEXT-BITS TO CAL-SUM-BITS
-    ELSE
-        MOVE CAL-NEAR-BITS TO CAL-SUM-BITS
-    END-IF.
