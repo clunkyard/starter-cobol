@@ -96,6 +96,66 @@ COPY "clunkyard.cpy".
 01 DODGE-COUNT    USAGE COMP-2.
 01 CUE-INDEX      PIC S9(9) COMP-5.
 01 FIRED          PIC S9(9) COMP-5.
+*> Bearing is earned: a scan contact's bearing is off by up to its
+*> bearing error (degrees, a fixed share of the arc), so a wide beam finds a
+*> robot and a narrow one aims at it. Contacts within 120 units are exact.
+01 SEARCH-ARC     USAGE COMP-2 VALUE 40.
+*> units across at the target: it stays in the beam from tick to tick
+01 HOLD-WIDTH     USAGE COMP-2 VALUE 60.
+*> degrees: the narrowest the beam holds
+01 MIN-ARC        USAGE COMP-2 VALUE 6.
+*> ticks of sightings the aim averages
+01 WINDOW-TICKS   PIC S9(9) COMP-5 VALUE 12.
+*> narrow sightings in the window before a shot
+01 SIGHTINGS-NEEDED PIC S9(9) COMP-5 VALUE 8.
+*> ticks between looks around the target, for a nearer robot
+01 LOOK-EVERY     PIC S9(9) COMP-5 VALUE 40.
+*> ticks to look again where a lost target was
+01 REACQUIRE-TICKS PIC S9(9) COMP-5 VALUE 10.
+01 HOLD-ARC       USAGE COMP-2.
+01 READY          PIC S9(9) COMP-5.
+01 LAST-SLOT      PIC S9(9) COMP-5 VALUE 0.
+01 LOST           PIC S9(9) COMP-5.
+01 SEEN-TICK      PIC S9(9) COMP-5.
+01 SPOT.
+   05 SPOT-X      USAGE COMP-2.
+   05 SPOT-Y      USAGE COMP-2.
+   05 SPOT-Z      USAGE COMP-2.
+*> The fit: a line through recent sightings (see FIT-LINE).
+01 HISTORY-TABLE.
+   05 SIGHTING OCCURS 32.
+      10 SIGHT-TICK          PIC S9(9) COMP-5.
+      10 SIGHT-SOURCE        PIC S9(9) COMP-5.
+      10 SIGHT-BEARING-ERROR USAGE COMP-2.
+      10 SIGHT-RANGE-ERROR   USAGE COMP-2.
+      10 SIGHT-X             USAGE COMP-2.
+      10 SIGHT-Y             USAGE COMP-2.
+      10 SIGHT-Z             USAGE COMP-2.
+01 HISTORY-CAPACITY PIC S9(9) COMP-5 VALUE 32.
+01 HISTORY-COUNT  PIC S9(9) COMP-5.
+01 ROW            PIC S9(9) COMP-5.
+01 FIT-COUNT      PIC S9(9) COMP-5.
+01 FIT-POSITION.
+   05 FIT-POSITION-X USAGE COMP-2.
+   05 FIT-POSITION-Y USAGE COMP-2.
+   05 FIT-POSITION-Z USAGE COMP-2.
+01 FIT-VELOCITY.
+   05 FIT-VELOCITY-X USAGE COMP-2.
+   05 FIT-VELOCITY-Y USAGE COMP-2.
+   05 FIT-VELOCITY-Z USAGE COMP-2.
+01 CUTOFF         USAGE COMP-2.
+01 BEST-ERROR     USAGE COMP-2.
+01 MEAN-TICK      USAGE COMP-2.
+01 MEAN-X         USAGE COMP-2.
+01 MEAN-Y         USAGE COMP-2.
+01 MEAN-Z         USAGE COMP-2.
+01 SUM-T          USAGE COMP-2.
+01 SUM-X          USAGE COMP-2.
+01 SUM-Y          USAGE COMP-2.
+01 SUM-Z          USAGE COMP-2.
+01 SPREAD         USAGE COMP-2.
+01 DT             USAGE COMP-2.
+01 AHEAD          USAGE COMP-2.
 *> STEER's input and output: a control towards TOWARDS from CURRENT, full
 *> at GAIN degrees off.
 01 TOWARDS        USAGE COMP-2.
@@ -125,8 +185,20 @@ START-MATCH.
 
 TAKE-TURN.
     CALL "CY-DRIVE-BRAKE" USING BRAKE
+    MOVE 0 TO LOST
+    IF NOT CY-SENSORS-NEAREST-FOUND AND LAST-SLOT NOT = 0
+        CALL "CY-TRACKER-LAST-SEEN" USING LAST-SLOT SEEN-TICK
+        IF RETURN-CODE = CY-OK AND CY-CLOCK-TICK - SEEN-TICK <= REACQUIRE-TICKS
+            CALL "CY-TRACKER-POSITION" USING LAST-SLOT SPOT
+            IF RETURN-CODE = CY-OK
+                MOVE 1 TO LOST
+            END-IF
+        END-IF
+    END-IF
     EVALUATE TRUE
         WHEN CY-SENSORS-NEAREST-FOUND PERFORM TRACK-TARGET
+        *> lost it: look again where it was last seen
+        WHEN LOST = 1 PERFORM REACQUIRE
         *> the freshest passive contact, for a few seconds
         WHEN CY-TRACKER-CUE-FOUND PERFORM FOLLOW-CUE
         WHEN OTHER PERFORM SEARCH-AROUND
@@ -192,16 +264,47 @@ TRACK-TARGET.
     CALL "CY-DRIVE-THROTTLE" USING THROTTLE
     CALL "CY-DRIVE-TURN" USING TURN-CONTROL
     CALL "CY-DRIVE-PITCH-TURN" USING STEERED
-    *> Narrow: holds it, reaching about 735.
-    MOVE 20 TO SCAN-ARC
+    MOVE CY-SENSORS-NEAREST-SLOT TO LAST-SLOT
+    *> Halve the beam each tick until it is HOLD-WIDTH across at the target:
+    *> narrow enough for a precise bearing, wide enough to keep it in.
+    COMPUTE HOLD-ARC = 2 * FUNCTION ATAN(HOLD-WIDTH / 2 / CY-SENSORS-NEAREST-RANGE) * 180 / FUNCTION PI
+    IF HOLD-ARC < MIN-ARC
+        MOVE MIN-ARC TO HOLD-ARC
+    END-IF
+    *> In a crowd a narrow beam sees one robot: every LOOK-EVERY ticks,
+    *> widen it for a tick.
+    IF FUNCTION MOD(CY-CLOCK-TICK, LOOK-EVERY) = 0
+        MOVE SEARCH-ARC TO SCAN-ARC
+    ELSE
+        COMPUTE SCAN-ARC = CY-SCANNER-LAST-ARC / 2
+        IF SCAN-ARC > SEARCH-ARC
+            MOVE SEARCH-ARC TO SCAN-ARC
+        END-IF
+        IF SCAN-ARC < HOLD-ARC
+            MOVE HOLD-ARC TO SCAN-ARC
+        END-IF
+    END-IF
     CALL "CY-SCANNER-HEADING" USING CY-SENSORS-NEAREST-BEARING
     CALL "CY-SCANNER-ARC" USING SCAN-ARC
     CALL "CY-SCANNER-PITCH" USING CY-SENSORS-NEAREST-ELEVATION
-    *> The heaviest shot that still covers the range in about a second,
-    *> aimed where the target will be if it holds course, lobbed under
-    *> gravity.
+    *> The heaviest shot that still covers the range in about a second.
     CALL "CY-GUN-POWER-FOR-FLIGHT-TIME" USING CY-SENSORS-NEAREST-RANGE ONE-SECOND SHOT-POWER
-    CALL "CY-GUN-LEAD" USING CY-SENSORS-NEAREST SHOT-POWER CY-SOLUTION
+    *> An exact contact: the lead is the intercept if the target holds
+    *> course. A noisy one: lead the fitted line, and fire only once it
+    *> rests on enough sightings.
+    MOVE 1 TO READY
+    IF CY-SENSORS-NEAREST-BEARING-ERROR > 0
+        PERFORM FIT-LINE
+        MOVE 1 TO RETURN-CODE
+        IF FIT-COUNT >= 2
+            CALL "CY-GUN-LEAD-POINT" USING FIT-POSITION FIT-VELOCITY SHOT-POWER CY-SOLUTION
+        END-IF
+        IF RETURN-CODE NOT = CY-OK OR FIT-COUNT < SIGHTINGS-NEEDED
+            MOVE 0 TO READY
+        END-IF
+    ELSE
+        CALL "CY-GUN-LEAD" USING CY-SENSORS-NEAREST SHOT-POWER CY-SOLUTION
+    END-IF
     IF RETURN-CODE = CY-OK
         MOVE CY-SOLUTION-HEADING TO AIM-HEADING
         MOVE CY-SOLUTION-PITCH TO AIM-PITCH
@@ -214,12 +317,97 @@ TRACK-TARGET.
     CALL "CY-ANGLES-ANGLE-DIFF" USING AIM-HEADING CY-GUN-AIM-NOW-HEADING ANGLE-ERROR
     CALL "CY-GUN-CAN-FIRE" USING SHOT-POWER SHOT-RESERVE FLAG
     IF FUNCTION ABS(ANGLE-ERROR) < 3 AND FUNCTION ABS(AIM-PITCH - CY-GUN-AIM-NOW-PITCH) < 3
-            AND FLAG = 1
+            AND FLAG = 1 AND READY = 1
         CALL "CY-GUN-FIRE"
         CALL "CY-GUN-POWER" USING SHOT-POWER
     END-IF
-    CALL "CY-STATUS-TEXT" USING Z"TRACK"
+    IF READY = 1
+        CALL "CY-STATUS-TEXT" USING Z"TRACK"
+    ELSE
+        CALL "CY-STATUS-TEXT" USING Z"NARROW"
+    END-IF
     CALL "CY-STATUS-VALUE" USING CY-SENSORS-NEAREST-RANGE.
+
+*> A straight line through the narrowest of the last WINDOW-TICKS ticks'
+*> sightings: where the robot is now (FIT-POSITION) and how fast it moves
+*> (FIT-VELOCITY). Each sighting is off by its bearing error; the line
+*> averages that out. FIT-COUNT is the sightings used, under 2 for no fit.
+FIT-LINE.
+    MOVE 0 TO FIT-COUNT
+    MOVE 0 TO HISTORY-COUNT
+    CALL "CY-TRACKER-HISTORY" USING LAST-SLOT HISTORY-TABLE HISTORY-CAPACITY HISTORY-COUNT
+    IF RETURN-CODE NOT = CY-OK
+        MOVE 0 TO HISTORY-COUNT
+    END-IF
+    COMPUTE CUTOFF = CY-CLOCK-TICK - WINDOW-TICKS
+    MOVE 1000000 TO BEST-ERROR
+    PERFORM VARYING ROW FROM 1 BY 1 UNTIL ROW > HISTORY-COUNT
+        IF SIGHT-TICK(ROW) > CUTOFF AND SIGHT-BEARING-ERROR(ROW) < BEST-ERROR
+            MOVE SIGHT-BEARING-ERROR(ROW) TO BEST-ERROR
+        END-IF
+    END-PERFORM
+    COMPUTE BEST-ERROR = BEST-ERROR * 1.5
+    MOVE 0 TO SUM-T SUM-X SUM-Y SUM-Z
+    PERFORM VARYING ROW FROM 1 BY 1 UNTIL ROW > HISTORY-COUNT
+        IF SIGHT-TICK(ROW) > CUTOFF AND SIGHT-BEARING-ERROR(ROW) <= BEST-ERROR
+            ADD 1 TO FIT-COUNT
+            ADD SIGHT-TICK(ROW) TO SUM-T
+            ADD SIGHT-X(ROW) TO SUM-X
+            ADD SIGHT-Y(ROW) TO SUM-Y
+            ADD SIGHT-Z(ROW) TO SUM-Z
+        END-IF
+    END-PERFORM
+    IF FIT-COUNT >= 2
+        COMPUTE MEAN-TICK = SUM-T / FIT-COUNT
+        COMPUTE MEAN-X = SUM-X / FIT-COUNT
+        COMPUTE MEAN-Y = SUM-Y / FIT-COUNT
+        COMPUTE MEAN-Z = SUM-Z / FIT-COUNT
+        MOVE 0 TO SPREAD SUM-X SUM-Y SUM-Z
+        PERFORM VARYING ROW FROM 1 BY 1 UNTIL ROW > HISTORY-COUNT
+            IF SIGHT-TICK(ROW) > CUTOFF AND SIGHT-BEARING-ERROR(ROW) <= BEST-ERROR
+                COMPUTE DT = SIGHT-TICK(ROW) - MEAN-TICK
+                COMPUTE SPREAD = SPREAD + DT * DT
+                COMPUTE SUM-X = SUM-X + DT * (SIGHT-X(ROW) - MEAN-X)
+                COMPUTE SUM-Y = SUM-Y + DT * (SIGHT-Y(ROW) - MEAN-Y)
+                COMPUTE SUM-Z = SUM-Z + DT * (SIGHT-Z(ROW) - MEAN-Z)
+            END-IF
+        END-PERFORM
+        COMPUTE AHEAD = CY-CLOCK-TICK - MEAN-TICK
+        COMPUTE FIT-POSITION-X = MEAN-X + SUM-X / SPREAD * AHEAD
+        COMPUTE FIT-POSITION-Y = MEAN-Y + SUM-Y / SPREAD * AHEAD
+        COMPUTE FIT-POSITION-Z = MEAN-Z + SUM-Z / SPREAD * AHEAD
+        COMPUTE FIT-VELOCITY-X = SUM-X / SPREAD * CY-MATCH-TICK-RATE
+        COMPUTE FIT-VELOCITY-Y = SUM-Y / SPREAD * CY-MATCH-TICK-RATE
+        COMPUTE FIT-VELOCITY-Z = SUM-Z / SPREAD * CY-MATCH-TICK-RATE
+    END-IF.
+
+REACQUIRE.
+    *> Lost it: look again where it was last seen, widening the beam.
+    CALL "CY-ANGLES-BEARING-TO" USING CY-ME-POSITION SPOT BEARING
+    MOVE 0 TO ELEVATION
+    IF FREE-FLIGHT = 1
+        CALL "CY-ANGLES-ELEVATION-TO" USING CY-ME-POSITION SPOT ELEVATION
+    END-IF
+    MOVE 45 TO GAIN
+    MOVE BEARING TO TOWARDS
+    MOVE CY-ME-HEADING TO CURRENT
+    PERFORM STEER
+    MOVE STEERED TO TURN-CONTROL
+    MOVE ELEVATION TO TOWARDS
+    MOVE CY-ME-PITCH TO CURRENT
+    PERFORM STEER
+    MOVE 0.5 TO THROTTLE
+    CALL "CY-DRIVE-THROTTLE" USING THROTTLE
+    CALL "CY-DRIVE-TURN" USING TURN-CONTROL
+    CALL "CY-DRIVE-PITCH-TURN" USING STEERED
+    COMPUTE SCAN-ARC = CY-SCANNER-LAST-ARC * 2
+    IF SCAN-ARC > SEARCH-ARC
+        MOVE SEARCH-ARC TO SCAN-ARC
+    END-IF
+    CALL "CY-SCANNER-HEADING" USING BEARING
+    CALL "CY-SCANNER-ARC" USING SCAN-ARC
+    CALL "CY-SCANNER-PITCH" USING ELEVATION
+    CALL "CY-STATUS-TEXT" USING Z"REACQUIRE".
 
 FOLLOW-CUE.
     *> Head for where it was heard, sweeping an arc that still reaches it
