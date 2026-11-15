@@ -20,7 +20,8 @@
 *> clock: tick seconds remaining_ticks
 *> arena: size gravity terrain_kind ground_height(x y)
 *> me: health position velocity heading pitch roll angular_velocity
-*>   attitude grounded altitude applied
+*>   attitude grounded altitude applied hull_mounts to_mount(heading pitch)
+*>   from_mount(heading pitch) mount_toward(point)
 *> battery: charge capacity regen sustainable_drive compute
 *>   drive_cost(fraction)
 *> drive: hover_lift
@@ -42,7 +43,8 @@
 *> score: me best armour
 *> angles: normalize(degrees) angle_diff(target current)
 *>   bearing_to(from to) elevation_to(from to) direction(heading pitch)
-*>   distance(a b) clamp(value low high)
+*>   distance(a b) to_chassis(heading pitch attitude)
+*>   from_chassis(heading pitch attitude) clamp(value low high)
 *> raw: number(path) text(path) has(path) flag(path) count(path) line()
 *> Controls: drive.set(throttle turn pitch_turn)
 *>   drive.forces(thrust strafe lift yaw_torque pitch_torque roll_torque brake)
@@ -86,6 +88,14 @@ COPY "clunkyard.cpy".
 01 CUE-ERROR      USAGE COMP-2.
 01 MARGIN         USAGE COMP-2.
 01 WORK           USAGE COMP-2.
+*> The dodge: ticks left, dodges taken, and its controls this tick.
+01 DODGE-TICKS    PIC S9(9) COMP-5 VALUE 0.
+01 DODGES         PIC S9(9) COMP-5 VALUE 0.
+01 DODGE-THROTTLE USAGE COMP-2.
+01 DODGE-SIDE     USAGE COMP-2.
+01 DODGE-COUNT    USAGE COMP-2.
+01 CUE-INDEX      PIC S9(9) COMP-5.
+01 FIRED          PIC S9(9) COMP-5.
 *> STEER's input and output: a control towards TOWARDS from CURRENT, full
 *> at GAIN degrees off.
 01 TOWARDS        USAGE COMP-2.
@@ -121,6 +131,7 @@ TAKE-TURN.
         WHEN CY-TRACKER-CUE-FOUND PERFORM FOLLOW-CUE
         WHEN OTHER PERFORM SEARCH-AROUND
     END-EVALUATE
+    PERFORM DODGE
     *> Low battery: drive gently so the shots can still be paid for.
     IF CY-BATTERY-CHARGE < CY-BATTERY-CAPACITY / 4
         CALL "CY-DRIVE-GET-THROTTLE" USING THROTTLE
@@ -187,7 +198,8 @@ TRACK-TARGET.
     CALL "CY-SCANNER-ARC" USING SCAN-ARC
     CALL "CY-SCANNER-PITCH" USING CY-SENSORS-NEAREST-ELEVATION
     *> The heaviest shot that still covers the range in about a second,
-    *> aimed where the target will be, lobbed under gravity.
+    *> aimed where the target will be if it holds course, lobbed under
+    *> gravity.
     CALL "CY-GUN-POWER-FOR-FLIGHT-TIME" USING CY-SENSORS-NEAREST-RANGE ONE-SECOND SHOT-POWER
     CALL "CY-GUN-LEAD" USING CY-SENSORS-NEAREST SHOT-POWER CY-SOLUTION
     IF RETURN-CODE = CY-OK
@@ -273,6 +285,48 @@ SEARCH-AROUND.
     CALL "CY-SCANNER-ARC" USING SCAN-ARC
     CALL "CY-SCANNER-PITCH" USING SCAN-PITCH
     CALL "CY-STATUS-TEXT" USING Z"SEARCH".
+
+*> A simple dodge: vary it, or predict the shooter. A shot heard starts
+*> half a second off the line of fire: odd dodges go left, even ones
+*> right. Turn +1 and strafe -1 go left.
+DODGE.
+    MOVE 0 TO FIRED
+    IF CY-SENSORS-CUES-FOUND
+        PERFORM VARYING CUE-INDEX FROM 1 BY 1 UNTIL CUE-INDEX > CY-SENSORS-CUES-COUNT
+            IF CY-SENSORS-CUES-SOURCE-MUZZLE(CUE-INDEX)
+                MOVE 1 TO FIRED
+            END-IF
+        END-PERFORM
+    END-IF
+    IF DODGE-TICKS = 0 AND FIRED = 1
+        ADD 1 TO DODGES
+        MOVE 10 TO DODGE-TICKS
+    END-IF
+    IF DODGE-TICKS > 0
+        SUBTRACT 1 FROM DODGE-TICKS
+        IF FUNCTION MOD(DODGES, 2) = 1
+            MOVE 1 TO DODGE-SIDE
+        ELSE
+            MOVE -1 TO DODGE-SIDE
+        END-IF
+        IF CY-MATCH-CONTROL-FORCES
+            MOVE 0.5 TO DODGE-THROTTLE
+            CALL "CY-DRIVE-THROTTLE" USING DODGE-THROTTLE
+            COMPUTE DODGE-SIDE = 0 - DODGE-SIDE
+            CALL "CY-DRIVE-STRAFE" USING DODGE-SIDE
+        ELSE
+            MOVE 1 TO DODGE-THROTTLE
+            CALL "CY-DRIVE-THROTTLE" USING DODGE-THROTTLE
+            CALL "CY-DRIVE-TURN" USING DODGE-SIDE
+        END-IF
+        IF FUNCTION MOD(DODGES, 2) = 1
+            CALL "CY-STATUS-TEXT" USING Z"dodge:left"
+        ELSE
+            CALL "CY-STATUS-TEXT" USING Z"dodge:right"
+        END-IF
+        MOVE DODGES TO DODGE-COUNT
+        CALL "CY-STATUS-VALUE" USING DODGE-COUNT
+    END-IF.
 
 *> A turn or pitch-turn control towards TOWARDS from CURRENT, full at GAIN
 *> degrees off, into STEERED.
